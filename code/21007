@@ -1,0 +1,227 @@
+
+# ==========================================
+# PISA 2022 하루 숙제 시간과 수학 성취도 분석
+# ==========================================
+
+# 1. 필요한 라이브러리 설치
+!pip install pandas numpy matplotlib seaborn scipy scikit-learn pyreadstat
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from google.colab import files
+from scipy.stats import pearsonr, linregress
+from sklearn.linear_model import LinearRegression
+
+# 한글 그래프 설정
+plt.rcParams['axes.unicode_minus'] = False
+
+# 2. OECD 데이터 파일 업로드
+uploaded = files.upload()
+file_name = next(iter(uploaded))
+
+# SPSS 파일 읽기
+df = pd.read_spss(file_name)
+
+print("전체 데이터 크기:", df.shape)
+print(df.head())
+
+# 3. 분석에 사용할 변수 선택
+# 한국 학생만 추출
+df['CNT'] = df['CNT'].astype(str).str.strip()
+korea = df[df['CNT'].isin(['KOR', 'Korea'])].copy()
+
+print("한국 학생 수:", len(korea))
+
+# 숙제 시간 변수 자동 확인
+homework_candidates = ['ST296Q04', 'ST296Q04JA']
+homework_col = next(
+    (c for c in homework_candidates if c in korea.columns),
+    None
+)
+
+if homework_col is None:
+    raise ValueError("숙제 시간 변수를 찾을 수 없습니다. 변수명을 확인하세요.")
+
+# 수학 성취도 추정 점수 10개 선택
+math_cols = [f'PV{i}MATH' for i in range(1, 11)]
+
+missing_cols = [c for c in math_cols if c not in korea.columns]
+if missing_cols:
+    raise ValueError(f"수학 점수 변수가 없습니다: {missing_cols}")
+
+# 4. 수학 점수 평균 계산
+# 학교 탐구용 간이 분석이며 공식 PISA 통계 산출법과는 다름
+korea['수학점수'] = korea[math_cols].apply(
+    pd.to_numeric, errors='coerce'
+).mean(axis=1)
+
+# 숙제 시간 숫자로 변환
+korea['숙제코드'] = pd.to_numeric(
+    korea[homework_col], errors='coerce'
+)
+
+# 숙제 시간 응답별 대표 시간(시간 단위)
+# 1: 30분 이하       -> 0.25시간
+# 2: 30분 초과~1시간 -> 0.75시간
+# 3: 1~2시간         -> 1.5시간
+# 4: 2~3시간         -> 2.5시간
+# 5: 3~4시간         -> 3.5시간
+# 6: 4시간 초과      -> 4.5시간
+
+time_mapping = {
+    1: 0.25,
+    2: 0.75,
+    3: 1.5,
+    4: 2.5,
+    5: 3.5,
+    6: 4.5
+}
+
+korea['숙제시간'] = korea['숙제코드'].map(time_mapping)
+
+# 5. 결측값 제거
+data = korea[['숙제시간', '수학점수']].dropna()
+
+print("\n최종 분석 학생 수:", len(data))
+print(data.describe())
+
+# 6. 숙제 시간별 학생 수 계산
+count = data.groupby('숙제시간').size()
+
+print("\n숙제 시간별 학생 수")
+print(count)
+
+# 7. 숙제 시간별 평균 수학 점수
+result = data.groupby('숙제시간')['수학점수'].agg(
+    ['count', 'mean']
+)
+
+print("\n숙제 시간별 평균 수학 성취도")
+print(result)
+
+# 8. 막대그래프
+plt.figure(figsize=(9, 5))
+
+sns.barplot(
+    x=result.index,
+    y=result['mean'],
+    color='skyblue'
+)
+
+plt.title('숙제 시간별 평균 수학 성취도')
+plt.xlabel('하루 숙제 시간 (시간)')
+plt.ylabel('평균 수학 점수')
+plt.grid(axis='y', alpha=0.3)
+plt.show()
+
+# 9. 산점도
+plt.figure(figsize=(9, 5))
+
+sns.stripplot(
+    data=data,
+    x='숙제시간',
+    y='수학점수',
+    alpha=0.15,
+    jitter=0.25,
+    color='blue'
+)
+
+sns.regplot(
+    data=data,
+    x='숙제시간',
+    y='수학점수',
+    scatter=False,
+    color='red'
+)
+
+plt.title('하루 숙제 시간과 수학 성취도의 관계')
+plt.xlabel('하루 숙제 시간 (시간)')
+plt.ylabel('수학 성취도 점수')
+plt.show()
+
+# 10. 상관관계 분석
+r, p = pearsonr(
+    data['숙제시간'],
+    data['수학점수']
+)
+
+print("\n===== 상관관계 분석 =====")
+print("상관계수:", round(r, 4))
+print("유의확률(p-value):", p)
+
+if r > 0:
+    print("양의 상관관계가 나타났습니다.")
+elif r < 0:
+    print("음의 상관관계가 나타났습니다.")
+else:
+    print("선형 상관관계가 거의 없습니다.")
+
+# 11. 선형 회귀분석
+X = data[['숙제시간']]
+y = data['수학점수']
+
+model = LinearRegression()
+model.fit(X, y)
+
+slope = model.coef_[0]
+intercept = model.intercept_
+r_squared = model.score(X, y)
+
+print("\n===== 회귀분석 결과 =====")
+print("회귀계수:", round(slope, 3))
+print("절편:", round(intercept, 3))
+print("결정계수 R²:", round(r_squared, 4))
+
+print(
+    f"회귀식: 수학 성취도 = "
+    f"{intercept:.2f} + {slope:.2f} × 숙제 시간"
+)
+
+# 12. 회귀선 그래프
+plt.figure(figsize=(9, 5))
+
+plt.scatter(
+    data['숙제시간'],
+    data['수학점수'],
+    alpha=0.15
+)
+
+x_line = np.linspace(
+    data['숙제시간'].min(),
+    data['숙제시간'].max(),
+    100
+)
+
+y_line = model.predict(
+    pd.DataFrame({'숙제시간': x_line})
+)
+
+plt.plot(x_line, y_line, color='red', linewidth=2)
+
+plt.title('숙제 시간과 수학 성취도 회귀분석')
+plt.xlabel('하루 숙제 시간 (시간)')
+plt.ylabel('수학 성취도 점수')
+plt.grid(alpha=0.3)
+plt.show()
+
+# 13. 분석 결과 자동 정리
+print("\n===== 최종 탐구 결과 =====")
+
+print(f"분석 학생 수: {len(data)}명")
+print(f"상관계수: {r:.3f}")
+print(f"회귀계수: {slope:.2f}")
+print(f"결정계수: {r_squared:.3f}")
+
+if r > 0.3:
+    print("숙제 시간이 길수록 수학 성취도가 높아지는 경향이 있습니다.")
+elif r > 0:
+    print("숙제 시간과 수학 성취도 사이에 약한 양의 관계가 있습니다.")
+elif r < -0.3:
+    print("숙제 시간이 길수록 수학 성취도가 낮아지는 경향이 있습니다.")
+elif r < 0:
+    print("숙제 시간과 수학 성취도 사이에 약한 음의 관계가 있습니다.")
+else:
+    print("두 변수 사이에 뚜렷한 선형 관계가 나타나지 않습니다.")
