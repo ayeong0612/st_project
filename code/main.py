@@ -1,3 +1,5 @@
+import os
+import glob
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -11,7 +13,6 @@ st.set_page_config(page_title="PISA 2022 숙제 시간과 수학 성취도 분�
 st.title("PISA 2022 한국 학생의 하루 숙제 시간과 수학 성취도 탐구")
 st.markdown("PISA 2022 데이터를 활용해 한국 학생들의 하루 전체 숙제 시간과 수학 성취도(PV1~PV10)의 관계를 분석합니다.")
 
-# 숙제 시간 응답 라벨 및 시간 변환 매핑 (PISA 2022 기준)
 HOMEWORK_LABELS = {
     1: "숙제 없음 (0시간)",
     2: "30분 이하 (0.25시간)",
@@ -32,33 +33,55 @@ HOMEWORK_HOURS = {
     7: 4.5
 }
 
-st.markdown("### 1. 데이터 업로드")
-uploaded_file = st.file_uploader(
-    "PISA 2022 학생 설문 데이터 파일(CSV, SAV, Parquet 등)을 업로드하세요.",
-    type=["csv", "sav", "parquet", "xlsx"]
-)
-
 @st.cache_data
-def load_data(file):
-    name = file.name.lower()
+def read_any_file(file_or_path):
+    name = file_or_path.lower() if isinstance(file_or_path, str) else file_or_path.name.lower()
     if name.endswith(".csv"):
-        return pd.read_csv(file, low_memory=False)
+        return pd.read_csv(file_or_path, low_memory=False)
     elif name.endswith(".parquet"):
-        return pd.read_parquet(file)
+        return pd.read_parquet(file_or_path)
     elif name.endswith(".xlsx"):
-        return pd.read_excel(file)
+        return pd.read_excel(file_or_path)
     elif name.endswith(".sav"):
-        return pd.read_spss(file)
+        return pd.read_spss(file_or_path)
     return None
 
-if uploaded_file is None:
-    st.info("분석을 시작하려면 위에서 PISA 2022 데이터 파일을 업로드해 주세요. (예: CY08MSP_STU_QQQ.SAV 또는 전처리된 CSV)")
+# 프로젝트 폴더 내 데이터 파일 자동 탐색
+def find_local_data_files():
+    patterns = ["**/*.csv", "**/*.sav", "**/*.parquet", "**/*.xlsx"]
+    found = []
+    for p in patterns:
+        found.extend(glob.glob(p, recursive=True))
+    # 결과 다운로드용 예시나 숨김 파일 제외
+    return [f for f in found if not os.path.basename(f).startswith(".")]
+
+local_files = find_local_data_files()
+
+with st.sidebar:
+    st.header("데이터 및 분석 설정")
+    uploaded_file = st.file_uploader("다른 파일로 분석하려면 업로드", type=["csv", "sav", "parquet", "xlsx"])
+    selected_local = None
+    if local_files and uploaded_file is None:
+        selected_local = st.selectbox("저장소 기본 데이터 파일", local_files, index=0)
+
+# 데이터 로드 (업로드 파일 우선, 없으면 저장소 내 첫 번째 데이터 파일 자동 로드)
+raw_df = None
+data_source_name = ""
+
+if uploaded_file is not None:
+    raw_df = read_any_file(uploaded_file)
+    data_source_name = uploaded_file.name
+elif selected_local is not None:
+    raw_df = read_any_file(selected_local)
+    data_source_name = selected_local
+
+if raw_df is None:
+    st.error("저장소(GitHub)에서 데이터 파일을 찾지 못했습니다. GitHub 저장소에 PISA 데이터 파일(.csv 등)을 업로드해 주세요.")
     st.stop()
 
-with st.spinner("데이터를 불러오는 중입니다..."):
-    raw_df = load_data(uploaded_file)
+st.caption(f"불러온 데이터: `{data_source_name}`")
 
-# 한국 데이터 필터링 (CNT 컬럼이 있는 경우 KOR만 추출)
+# 한국 데이터 필터링
 if "CNT" in raw_df.columns:
     df = raw_df[raw_df["CNT"].astype(str).str.upper() == "KOR"].copy()
     if df.empty:
@@ -66,33 +89,31 @@ if "CNT" in raw_df.columns:
 else:
     df = raw_df.copy()
 
-# PV(수학 성취도 추정값) 컬럼 자동 탐색
+# PV 컬럼 자동 탐색
 pv_cols = [f"PV{i}MATH" for i in range(1, 11) if f"PV{i}MATH" in df.columns]
 if not pv_cols:
     st.error("데이터에서 수학 성취도 컬럼(PV1MATH ~ PV10MATH)을 찾을 수 없습니다.")
     st.stop()
 
-# 숙제 시간 관련 컬럼 자동 탐색 (PISA 2022: ST296Q01JA 등)
+# 숙제 시간 컬럼 자동 선택 (가장 흔한 PISA 2022 변수명 우선)
 hw_candidates = [col for col in ["ST296Q01JA", "ST296Q01HA", "HOMEWORK", "_homework_code"] if col in df.columns]
-st.markdown("### 2. 분석 변수 설정 및 전처리")
+default_hw = hw_candidates[0] if hw_candidates else df.columns[0]
+default_wt = "W_FSTUWT" if "W_FSTUWT" in df.columns else "가중치 사용 안 함"
 
-col1, col2 = st.columns(2)
-with col1:
-    default_idx = 0 if hw_candidates else 0
+with st.sidebar:
     hw_col = st.selectbox(
-        "숙제 시간 설문 문항 컬럼을 선택하세요",
+        "숙제 시간 변수 컬럼",
         options=df.columns.tolist(),
-        index=df.columns.tolist().index(hw_candidates[0]) if hw_candidates else 0
+        index=df.columns.tolist().index(default_hw)
     )
-with col2:
-    weight_candidates = ["W_FSTUWT"] if "W_FSTUWT" in df.columns else ["가중치 사용 안 함"]
+    weight_options = ["가중치 사용 안 함"] + df.columns.tolist()
     weight_col = st.selectbox(
-        "표본 가중치 컬럼 (없으면 '가중치 사용 안 함' 선택)",
-        options=["가중치 사용 안 함"] + df.columns.tolist(),
-        index=1 if "W_FSTUWT" in df.columns else 0
+        "표본 가중치 컬럼",
+        options=weight_options,
+        index=weight_options.index(default_wt)
     )
 
-# 전처리 수행
+# 전처리
 data = df.copy()
 data["_homework_code"] = pd.to_numeric(data[hw_col], errors="coerce")
 data = data[data["_homework_code"].isin(HOMEWORK_HOURS.keys())].copy()
@@ -108,12 +129,12 @@ else:
     data["_weight"] = 1.0
 
 if len(data) < 20:
-    st.warning("유효한 분석 대상 데이터가 너무 적습니다. 선택한 숙제 시간 컬럼이 올바른지 확인해 주세요.")
+    st.warning("유효한 분석 대상 데이터가 너무 적습니다. 왼쪽 사이드바에서 숙제 시간 변수 컬럼을 올바르게 선택해 주세요.")
     st.stop()
 
 info = {"pv_cols": pv_cols}
 
-# PV별 가중 상관계수, 회귀계수(기울기, 절편) 및 모델 비교 계산
+# 통계 및 모델 계산
 stat_rows = []
 eval_rows = []
 
@@ -122,7 +143,6 @@ for pv in pv_cols:
     y = data[pv].values
     w = data["_weight"].values
 
-    # 가중 평균 및 공분산/분산 계산
     w_sum = np.sum(w)
     x_mean = np.sum(w * x) / w_sum
     y_mean = np.sum(w * y) / w_sum
@@ -141,7 +161,6 @@ for pv in pv_cols:
         "절편": intercept
     })
 
-    # 기준모델 vs 회귀모델 성능 평가 (8:2 분할)
     if len(data) >= 50:
         X_train, X_test, y_train, y_test, w_train, w_test = train_test_split(
             x.reshape(-1, 1), y, w, test_size=0.2, random_state=42
@@ -168,7 +187,6 @@ summary = {
     "intercept": stat_df["절편"].mean()
 }
 
-# 구간별 통계 계산
 group_list = []
 for code in sorted(HOMEWORK_LABELS.keys()):
     sub = data[data["_homework_code"] == code]
@@ -181,8 +199,13 @@ for code in sorted(HOMEWORK_LABELS.keys()):
         })
 group_df = pd.DataFrame(group_list)
 
-# 3. 요약 결과 출력
-st.markdown("### 3. 핵심 분석 결과 요약")
+# 1. 데이터 미리보기
+st.markdown("### 1. 분석 데이터 미리보기")
+preview_cols = [c for c in ["CNT", "STDSCHID", "CNTSTUID", hw_col, "_homework_hours", "W_FSTUWT", "PV1MATH"] if c in data.columns]
+st.dataframe(data[preview_cols].head(10), use_container_width=True, hide_index=True)
+
+# 2. 핵심 분석 결과 요약
+st.markdown("### 2. 핵심 분석 결과 요약")
 m1, m2, m3 = st.columns(3)
 m1.metric("분석 대상 학생 수", f"{len(data):,}명")
 m2.metric("평균 상관계수 (r)", f"{summary['corr']:.3f}")
@@ -205,7 +228,8 @@ st.write(
 with st.expander("PV별 분석 결과 확인"):
     st.dataframe(stat_df.round(4), use_container_width=True)
 
-st.markdown("### 4. 회귀분석 그래프")
+# 3. 회귀분석 그래프
+st.markdown("### 3. 회귀분석 그래프")
 st.caption(
     "점은 첫 번째 수학 성취도 추정값(PV1MATH)을 사용해 표시하고, "
     "회귀직선은 사용 가능한 모든 PV의 회귀선을 평균해 표시합니다. "
@@ -246,7 +270,8 @@ fig.update_layout(
 )
 st.plotly_chart(fig, use_container_width=True)
 
-st.markdown("### 5. 숙제 시간 구간별 학생 수와 평균 성취도")
+# 4. 숙제 시간 구간별 통계
+st.markdown("### 4. 숙제 시간 구간별 학생 수와 평균 성취도")
 if not group_df.empty:
     show_group = group_df[["숙제 시간", "학생 수", "평균 수학 성취도"]].copy()
     show_group["평균 수학 성취도"] = show_group["평균 수학 성취도"].round(2)
@@ -268,7 +293,8 @@ if not group_df.empty:
     )
     st.plotly_chart(bar_fig, use_container_width=True)
 
-st.markdown("### 6. 기준모델과 회귀모델 비교")
+# 5. 기준모델과 회귀모델 비교
+st.markdown("### 5. 기준모델과 회귀모델 비교")
 if not eval_df.empty:
     mae_base = eval_df["기준모델 MAE"].mean()
     mae_reg = eval_df["회귀모델 MAE"].mean()
@@ -296,7 +322,8 @@ if not eval_df.empty:
 else:
     st.info("테스트 자료가 충분하지 않아 모델 비교를 계산하지 못했습니다.")
 
-st.markdown("### 7. 탐구 결과 해석 시 주의할 점")
+# 6. 주의할 점
+st.markdown("### 6. 탐구 결과 해석 시 주의할 점")
 st.markdown(
     """
 - 이 분석은 숙제 시간과 수학 성취도의 **관계**를 확인하는 것이며, 숙제 시간이 성취도를 직접 높인다는 인과관계를 증명하지 않습니다.
@@ -307,7 +334,8 @@ st.markdown(
     """
 )
 
-st.markdown("### 8. 결과 내려받기")
+# 7. 결과 내려받기
+st.markdown("### 7. 결과 내려받기")
 download_df = data.copy()
 download_df["하루 전체 숙제 시간(시간)"] = download_df["_homework_hours"]
 download_df["숙제 시간 응답"] = download_df["_homework_code"].map(HOMEWORK_LABELS)
